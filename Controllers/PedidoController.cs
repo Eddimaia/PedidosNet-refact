@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PedidosNet.Data;
+using PedidosNet.Domain;
 using PedidosNet.DTOs;
 using PedidosNet.Models;
 
@@ -8,19 +9,15 @@ namespace PedidosNet.Controllers;
 
 [ApiController]
 [Route("api/pedidos")]
-public class PedidoController : ControllerBase
+public class PedidoController(
+    AppDbContext context, 
+    IPedidoFactory pedidoFactory) 
+    : ControllerBase
 {
-    private readonly AppDbContext _context;
-
-    public PedidoController(AppDbContext context)
-    {
-        _context = context;
-    }
-
     [HttpGet]
     public async Task<IActionResult> Listar()
     {
-        var pedidos = await _context.Pedidos
+        var pedidos = await context.Pedidos
             .Include(p => p.Cliente)
             .Include(p => p.Itens)
             .AsNoTracking()
@@ -32,7 +29,7 @@ public class PedidoController : ControllerBase
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> ObterPorId(Guid id)
     {
-        var pedido = await _context.Pedidos
+        var pedido = await context.Pedidos
             .Include(p => p.Cliente)
             .Include(p => p.Itens)
             .FirstOrDefaultAsync(p => p.Id == id);
@@ -43,15 +40,19 @@ public class PedidoController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Criar(CreatePedidoRequest request)
     {
-        var cliente = await _context.Clientes.FindAsync(request.ClienteId);
+        var cliente = await context.Clientes.FindAsync(request.ClienteId);
         if (cliente is null)
             return BadRequest("Cliente não encontrado.");
+
+        //Regra 1
+        if(cliente.Bloqueado)
+            return BadRequest("Cliente bloqueado não pode criar pedido.");
 
         var itens = new List<ItemPedido>();
 
         foreach (var itemRequest in request.Itens)
         {
-            var produto = await _context.Produtos.FindAsync(itemRequest.ProdutoId);
+            var produto = await context.Produtos.FindAsync(itemRequest.ProdutoId);
             if (produto is null)
                 return BadRequest($"Produto {itemRequest.ProdutoId} não encontrado.");
 
@@ -65,17 +66,7 @@ public class PedidoController : ControllerBase
             });
         }
 
-        var pedido = new Pedido
-        {
-            Id = Guid.NewGuid(),
-            ClienteId = cliente.Id,
-            Status = "Pendente",
-            DataCriacao = DateTime.Now,
-            Itens = itens
-        };
-
-        // Calcula o total baseado nos itens
-        pedido.Total = pedido.Itens.Sum(i => i.Preco * i.Quantidade);
+        var pedido = pedidoFactory.Criar(cliente, itens);
 
         // ⚠️ Regras de negócio direto no controller — o primeiro sinal amarelo
         // piscando no painel . A partir daqui, cada nova regra
@@ -86,8 +77,8 @@ public class PedidoController : ControllerBase
         if (pedido.Total > 2000)
             pedido.Total -= pedido.Total * 0.05m;
 
-        _context.Pedidos.Add(pedido);
-        await _context.SaveChangesAsync();
+        context.Pedidos.Add(pedido);
+        await context.SaveChangesAsync();
 
         return Ok(pedido.Id);
     }
